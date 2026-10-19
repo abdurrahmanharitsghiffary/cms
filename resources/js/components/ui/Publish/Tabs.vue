@@ -46,22 +46,50 @@ const hasMultipleVisibleMainTabs = computed(() => visibleMainTabs.value.length >
 const shouldShowSidebar = computed(() => (slots.actions || sidebarTab.value) && width.value > 920);
 const activeTab = ref(visibleMainTabs.value[0].handle);
 
-onMounted(() => setActiveTabFromHash());
+let lastNavigationType = 'traverse';
+
+onMounted(() => {
+    setActiveTabFromHash();
+    window.addEventListener('hashchange', restoreTabFromHash);
+    window.navigation?.addEventListener('navigate', rememberNavigationType);
+});
+
+onUnmounted(() => {
+    window.removeEventListener('hashchange', restoreTabFromHash);
+    window.navigation?.removeEventListener('navigate', rememberNavigationType);
+});
+
+function rememberNavigationType(event) {
+    lastNavigationType = event.navigationType;
+}
+
+// Only back/forward switches tabs, not links to other anchors like the skip links.
+function restoreTabFromHash() {
+    if (lastNavigationType === 'traverse') setActiveTabFromHash();
+}
+
+function isVisibleTab(tab) {
+    return visibleMainTabs.value.some((t) => t.handle === tab);
+}
 
 function setActive(tab) {
-    if (visibleMainTabs.value.some((t) => t.handle === tab)) {
+    if (isVisibleTab(tab)) {
         activeTab.value = tab;
     } else {
         activeTab.value = visibleMainTabs.value[0].handle;
     }
 }
 
+function tabInUrl() {
+    return window.location.hash.slice(1) || visibleMainTabs.value[0].handle;
+}
+
 function setActiveTabFromHash() {
     if (!rememberTab.value) return;
 
-    if (window.location.hash.length === 0) return;
+    const tab = tabInUrl();
 
-    setActive(window.location.hash.substr(1));
+    if (isVisibleTab(tab)) activeTab.value = tab;
 }
 
 watch(
@@ -76,7 +104,10 @@ watch(
 watch(
     () => activeTab.value,
     (tab) => {
-        if (rememberTab.value) window.location.hash = tab
+        if (!rememberTab.value || tabInUrl() === tab) return;
+
+        // Setting location.hash fires popstate, and Inertia would restore a stale URL after switching sites.
+        window.history.pushState(window.history.state, '', `#${tab}`);
     }
 );
 

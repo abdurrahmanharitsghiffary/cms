@@ -1,4 +1,4 @@
-import { test, expect, beforeEach, vi } from 'vitest';
+import { test, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // Mock @inertiajs/vue3 router before importing the composable so it captures
 // the mock instead of the real router.
@@ -12,6 +12,7 @@ vi.mock('@inertiajs/vue3', () => {
                     listeners[event] = listeners[event].filter((cb) => cb !== callback);
                 };
             },
+            visit: vi.fn(),
             __listeners: listeners,
         },
     };
@@ -117,7 +118,7 @@ test('popstate stops propagation so Inertia\'s listener cannot wipe form data', 
 });
 
 test('popstate is ignored for hash-only changes (e.g. tab switching)', () => {
-    const { add, count } = useDirtyState();
+    const { add, remove, count } = useDirtyState();
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
 
     add('entry');
@@ -131,12 +132,34 @@ test('popstate is ignored for hash-only changes (e.g. tab switching)', () => {
     expect(count()).toBe(1); // still dirty
 
     confirmSpy.mockRestore();
+
+    remove('entry'); // prevent dirty state from leaking into subsequent tests via accumulated listeners
+});
+
+test('hash-only changes stop propagation so Inertia\'s listener cannot wipe form data', () => {
+    const { add, remove } = useDirtyState();
+
+    add('entry');
+
+    let inertiaListenerFired = false;
+    const inertiaListener = () => { inertiaListenerFired = true; };
+    window.addEventListener('popstate', inertiaListener);
+
+    // Simulate going back to a previous tab of the same page
+    window.history.replaceState({ page: 'A', url: '/a' }, '', '/a#tab-1');
+    window.dispatchEvent(new PopStateEvent('popstate', { state: { page: 'A' } }));
+
+    expect(inertiaListenerFired).toBe(false);
+
+    window.removeEventListener('popstate', inertiaListener);
+
+    remove('entry'); // prevent dirty state from leaking into subsequent tests via accumulated listeners
 });
 
 test('popstate is ignored when confirm_dirty_navigation preference is disabled', () => {
     global.Statamic.$preferences.get = () => false;
 
-    const { add } = useDirtyState();
+    const { add, remove } = useDirtyState();
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
 
     add('entry');
@@ -147,4 +170,80 @@ test('popstate is ignored when confirm_dirty_navigation preference is disabled',
 
     expect(confirmSpy).not.toHaveBeenCalled();
     confirmSpy.mockRestore();
+
+    remove('entry'); // prevent dirty state from leaking into subsequent tests via accumulated listeners
+});
+
+test('popstate to an entry left as {} reloads it without keeping the form when nothing is dirty', async () => {
+    const { router } = await import('@inertiajs/vue3');
+    router.visit.mockClear();
+    const inertiaListener = vi.fn();
+    window.addEventListener('popstate', inertiaListener);
+
+    window.history.replaceState({}, '', '/a');
+    window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
+
+    expect(inertiaListener).not.toHaveBeenCalled();
+    expect(router.visit).toHaveBeenCalledWith(window.location.href, { replace: true, preserveScroll: true });
+
+    window.removeEventListener('popstate', inertiaListener);
+});
+
+test('popstate with Inertia\'s own state is left to Inertia when nothing is dirty', async () => {
+    const { router } = await import('@inertiajs/vue3');
+    router.visit.mockClear();
+    const inertiaListener = vi.fn();
+    window.addEventListener('popstate', inertiaListener);
+
+    window.history.replaceState({ page: 'A' }, '', '/a');
+    window.dispatchEvent(new PopStateEvent('popstate', { state: { page: 'A' } }));
+
+    expect(inertiaListener).toHaveBeenCalled();
+    expect(router.visit).not.toHaveBeenCalled();
+
+    window.removeEventListener('popstate', inertiaListener);
+});
+
+let inertiaListener;
+
+const withNavigation = async () => {
+    window.navigation = new EventTarget();
+    vi.resetModules();
+    await import('../composables/dirty-state.js');
+};
+
+// Registered after the dirty state listener, like Inertia's.
+const listenLikeInertia = () => {
+    inertiaListener = vi.fn();
+    window.addEventListener('popstate', inertiaListener);
+};
+
+const traverse = (to, { hashChange }) => {
+    const event = Object.assign(new Event('navigate'), { navigationType: 'traverse', hashChange });
+    window.navigation.dispatchEvent(event);
+    window.history.replaceState({ page: 'A' }, '', to);
+    window.dispatchEvent(new PopStateEvent('popstate', { state: { page: 'A' } }));
+};
+
+afterEach(() => {
+    window.removeEventListener('popstate', inertiaListener);
+    delete window.navigation;
+});
+
+test('back/forward that only changes the hash stops propagation, even when nothing is dirty', async () => {
+    await withNavigation();
+    listenLikeInertia();
+
+    traverse('/a#tab-1', { hashChange: true });
+
+    expect(inertiaListener).not.toHaveBeenCalled();
+});
+
+test('back/forward to another page is left to Inertia when nothing is dirty', async () => {
+    await withNavigation();
+    listenLikeInertia();
+
+    traverse('/b', { hashChange: false });
+
+    expect(inertiaListener).toHaveBeenCalled();
 });

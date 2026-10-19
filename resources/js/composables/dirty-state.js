@@ -62,24 +62,51 @@ function disableWarning() {
     inertiaWarningListener = null;
 }
 
+// Popstate doesn't say whether only the hash changed, but the Navigation API
+// (where supported) fires `navigate` just before it, and that does.
+let hashOnlyTraversal = false;
+
+window.navigation?.addEventListener('navigate', (event) => {
+    hashOnlyTraversal = event.navigationType === 'traverse' && event.hashChange;
+});
+
 // Intercept browser back/forward (popstate) navigation. Inertia's popstate
 // handler swaps pages without firing its `before` event, so we register at
 // module load — before `createInertiaApp()` calls `eventHandler.init()` —
 // to ensure our listener runs first and can block Inertia via
 // `stopImmediatePropagation()`. See statamic/cms#14055.
 window.addEventListener('popstate', (event) => {
-    if (! dirty.value.length) return;
+    // Only the hash changed (e.g. back to the previous tab), so there's no
+    // need for Inertia to remount or reload the page.
+    if (hashOnlyTraversal) {
+        hashOnlyTraversal = false;
+        event.stopImmediatePropagation();
+        return;
+    }
+
+    if (! dirty.value.length) {
+        // Switching site and loading a publish form leave `{}` as the history
+        // state. Inertia would reload that page but keep the current form (e.g.
+        // the other localization's values), so reload it without keeping it.
+        if (event.state && ! Object.keys(event.state).length) {
+            event.stopImmediatePropagation();
+            router.visit(window.location.href, { replace: true, preserveScroll: true });
+        }
+
+        return;
+    }
+
     if (! isWarningEnabled()) return;
+
+    // Block Inertia's listener so it doesn't `setQuietly(..., { preserveState: false })`
+    // and wipe the in-memory form data.
+    event.stopImmediatePropagation();
 
     // Hash-only navigation (e.g. tab switching) stays on the same page.
     if (dirtyUrl) {
         const origin = new URL(dirtyUrl);
         if (window.location.pathname === origin.pathname && window.location.search === origin.search) return;
     }
-
-    // Block Inertia's listener so it doesn't `setQuietly(..., { preserveState: false })`
-    // and wipe the in-memory form data before we've confirmed.
-    event.stopImmediatePropagation();
 
     // Re-push the dirty page we were just on so the URL/Inertia state are
     // restored while the (synchronous) confirm() is open and after a cancel.
